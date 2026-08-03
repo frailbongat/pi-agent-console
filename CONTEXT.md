@@ -8,6 +8,10 @@ Agent Console is an open-source Pi package for supervising concurrent full Pi se
 The package and native in-session terminal control plane through which a user supervises agents.
 _Avoid_: Agent View, standalone dashboard
 
+**Agent Console Data Root**:
+The private durable per-user storage owned by Agent Console and bound to exactly one canonical Pi configuration root. It holds Agent Console configuration, registry state, recovery checkpoints, logs, and managed workspace artifacts, survives package update and removal, and is distinct from package code and reboot-volatile coordination files.
+_Avoid_: Pi configuration root, package directory, runtime directory
+
 **Console View State**:
 Client-local project, Agent Status, archive, and name filters plus an optional project-or-status grouping choice. It affects presentation only and never changes the Dispatch Target or global Work Queue.
 _Avoid_: Saved group, scheduling filter, Dispatch Target
