@@ -36,6 +36,46 @@ _Avoid_: Broadcast, reply, background prompt
 The explicit canonical project and requested relative working directory used by default for subsequent Dispatches from one Agent Console client. It remains fixed until deliberately changed, is independent of list selection and view filters, and may be replaced by a one-shot `cwd` override in one Dispatch without prescribing the Agent's eventual workspace path.
 _Avoid_: Selected Agent, current list group, Agent workspace
 
+**Original Checkout**:
+The existing user-owned checkout in which a foreground Pi session first becomes supervised as an Agent. Its Agent may release ownership, but Agent Console never cleans, resets, switches, or automatically reallocates the checkout.
+_Avoid_: Managed worktree, default branch, disposable checkout
+
+**Agent Workspace**:
+The canonical checkout directory durably and exclusively assigned to one Agent for its file context. It is either the Original Checkout or a Managed Worktree and remains assigned across Agent Status changes and Agent Runtime replacement until explicitly released or permanent deletion passes its safety checks.
+_Avoid_: Dispatch Target, requested working directory, temporary Runtime directory
+
+**Managed Worktree**:
+A linked Git worktree provisioned by the Supervisor as one isolated Agent Workspace. New and Dispatch use one, while existing user-owned checkouts, directory copies, temporary clones, and purportedly read-only shared directories are never Managed Worktrees.
+_Avoid_: Original Checkout, clone, shared workspace, user-created worktree
+
+**Workspace Base**:
+The exact commit frozen when New or Dispatch is accepted and used to create its Managed Worktree's initial branch. It defaults to the `HEAD` commit of the checkout that resolved the effective Dispatch Target, may be explicitly overridden by another local commit, and never includes uncommitted filesystem state.
+_Avoid_: Default branch, launch-time `HEAD`, remote guess, Dispatch Target
+
+**Workspace Claim**:
+The Supervisor-authoritative durable and exclusive assignment of one canonical Agent Workspace to one Agent. It survives Agent Runtime replacement and prevents assignment to another Agent until released; a Git worktree lock protects metadata but is not the Workspace Claim.
+_Avoid_: Git worktree lock, process lock, Runtime lease
+
+**Workspace Conflict**:
+An unresolved mismatch between a Workspace Claim and observed Agent Runtime, filesystem, or Git worktree identity. It prevents launch, resume, reassignment, and cleanup until reconciliation or explicit recovery resolves it; it is not itself an Agent Status.
+_Avoid_: Failed, missing-file inference, disposable worktree
+
+**Workspace Release**:
+An explicit operation that ends an Agent's Workspace Claim without deleting the Agent or Conversation. Releasing an Original Checkout only unbinds it; releasing a Managed Worktree preserves enough committed branch identity for a later resume even when its linked checkout is safely removed.
+_Avoid_: Stop, Archive, Permanent delete, automatic retention cleanup
+
+**Preserved Checkout**:
+A former Managed Worktree durably recorded as a locked, user-owned artifact when its Workspace Claim is released without removing its files or Git registration. Its record and lock survive deletion of the originating Agent until the user explicitly unlocks and forgets it; Agent Console never automatically reallocates or cleans it.
+_Avoid_: Agent Workspace, Managed Worktree, failed cleanup, disposable worktree
+
+**Workspace Publication Proof**:
+Evidence permitting ordinary Managed Worktree removal: either its managed branch has no commits beyond the Workspace Base, or its configured remote push ref currently points to the exact local tip. Missing, stale, offline, remote-ahead, or otherwise ambiguous evidence is unknown and blocks ordinary removal.
+_Avoid_: Clean working tree, local tracking-ref inference, presumed push
+
+**Destructive Workspace Cleanup**:
+An explicitly confirmed Managed Worktree removal that may discard reviewed filesystem changes or proceed without Workspace Publication Proof. It can never override liveness, identity, path-boundary, inventory, or Workspace Conflict checks, and it preserves committed continuation refs and branches.
+_Avoid_: Workspace Release, Permanent delete, force-through-conflict cleanup
+
 **Agent Start Configuration**:
 The effective target, resolved project-trust mode, model, and thinking level frozen when a promptless New or Dispatch is accepted. A one-shot `cwd` may replace the client's Dispatch Target, and other explicit one-shot overrides take precedence over the configuration a fresh Pi invocation would resolve there; unresolved or invalid values prevent acceptance, and transient settings from another Conversation are never inherited.
 _Avoid_: Agent profile, copied session settings, fallback model
