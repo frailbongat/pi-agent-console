@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# THROWAWAY PROTOTYPE shim. Installed temporarily ahead of the real pi binary.
+set -euo pipefail
+
+resolve_path() {
+	python3 - "$1" <<'PY'
+import os
+import sys
+print(os.path.realpath(sys.argv[1]))
+PY
+}
+
+SELF="$(resolve_path "${BASH_SOURCE[0]}")"
+ROOT="$(CDPATH= cd -- "$(dirname -- "$SELF")/.." && pwd -P)"
+STATE_DIR="${PI_AGENT_CONSOLE_PROTOTYPE_STATE_DIR:-$HOME/.cache/pi-agent-console-wayfinder-tmux}"
+REAL_PI_FILE="$STATE_DIR/real-pi"
+CONTROLLER="$ROOT/prototype"
+SOCKET="$STATE_DIR/tmux.sock"
+
+if [[ ! -r "$REAL_PI_FILE" ]]; then
+	printf 'Agent Console prototype is not installed correctly: missing %s\n' "$REAL_PI_FILE" >&2
+	printf 'Run %s install\n' "$CONTROLLER" >&2
+	exit 70
+fi
+
+REAL_PI="$(<"$REAL_PI_FILE")"
+if [[ ! -x "$REAL_PI" ]]; then
+	printf 'Agent Console prototype cannot execute the recorded Pi binary: %s\n' "$REAL_PI" >&2
+	exit 70
+fi
+
+# Emergency opt-out and all noninteractive/package-management surfaces remain
+# ordinary Pi. This is intentionally checked before nested-tmux rejection.
+if [[ "${PI_AGENT_CONSOLE:-1}" == "0" || "${PI_AGENT_CONSOLE_PROTOTYPE_BYPASS:-0}" == "1" ]]; then
+	exec "$REAL_PI" "$@"
+fi
+
+passthrough=false
+expect_mode=false
+for arg in "$@"; do
+	if $expect_mode; then
+		case "$arg" in
+			json|rpc|print) passthrough=true ;;
+		esac
+		expect_mode=false
+		continue
+	fi
+	case "$arg" in
+		-p|--print|--mode=json|--mode=rpc|--mode=print|--export|--list-models|-v|--version|-h|--help)
+			passthrough=true
+			;;
+		--mode)
+			expect_mode=true
+			;;
+		install|remove|uninstall|update|list|config)
+			passthrough=true
+			;;
+	esac
+done
+
+if $passthrough; then
+	exec "$REAL_PI" "$@"
+fi
+
+if [[ -n "${TMUX:-}" ]]; then
+	CURRENT_SOCKET="${TMUX%%,*}"
+	if [[ "$CURRENT_SOCKET" == "$SOCKET" ]]; then
+		printf 'Agent Console prototype: nested pi invocation refused inside a supervised Agent.\n' >&2
+	else
+		printf 'Agent Console prototype: unsupported pre-existing tmux detected (%s).\n' "$CURRENT_SOCKET" >&2
+	fi
+	printf 'The native prototype fails closed instead of nesting terminal fabrics.\n' >&2
+	printf 'Use PI_AGENT_CONSOLE=0 pi ... for ordinary Pi in this shell.\n' >&2
+	exit 78
+fi
+
+exec "$CONTROLLER" attach-or-create -- "$@"

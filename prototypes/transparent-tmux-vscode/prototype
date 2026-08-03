@@ -1,0 +1,470 @@
+#!/usr/bin/env bash
+# THROWAWAY PROTOTYPE controller for the transparent tmux path.
+set -euo pipefail
+
+ROOT="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+CONFIG="$ROOT/tmux.conf"
+WRAPPER="$ROOT/bin/pi"
+RUN_AGENT="$ROOT/run-agent"
+STATE_DIR="${PI_AGENT_CONSOLE_PROTOTYPE_STATE_DIR:-$HOME/.cache/pi-agent-console-wayfinder-tmux}"
+SOCKET="$STATE_DIR/tmux.sock"
+TMUX_CLIENT_DIR="$STATE_DIR/client"
+TMUX_CLIENT="$TMUX_CLIENT_DIR/agent"
+TMUX_CLIENT_FEATURES="sync"
+LEGACY_TMUX_CLIENT="$TMUX_CLIENT_DIR/Agent Console"
+SHIM_DIR="${PI_AGENT_CONSOLE_PROTOTYPE_SHIM_DIR:-$HOME/.local/bin}"
+SHIM="$SHIM_DIR/pi"
+LEGACY_SHIM="$HOME/.pi/agent/bin/pi"
+
+usage() {
+	cat <<EOF
+THROWAWAY Agent Console tmux prototype
+
+Usage:
+  $0 install
+  $0 doctor
+  $0 status
+  $0 new [--cwd PATH] [-- PI_ARGS...]
+  $0 attach [AGENT_NAME]
+  $0 nested-test
+  $0 uninstall
+  $0 stop --force
+  $0 clean --force
+
+After install, open a normal VS Code integrated terminal and invoke plain: pi
+EOF
+}
+
+resolve_path() {
+	python3 - "$1" <<'PY'
+import os
+import sys
+print(os.path.realpath(sys.argv[1]))
+PY
+}
+
+init_state() {
+	mkdir -p "$STATE_DIR" "$STATE_DIR/agents" "$STATE_DIR/logs" "$TMUX_CLIENT_DIR"
+	chmod 700 "$STATE_DIR" "$STATE_DIR/agents" "$STATE_DIR/logs" "$TMUX_CLIENT_DIR"
+}
+
+prepare_tmux_client() {
+	init_state
+	local source version temporary
+	source="$(command -v tmux)"
+	version="$(tmux -V)"
+	if [[ -x "$TMUX_CLIENT" && "$("$TMUX_CLIENT" -V 2>/dev/null || true)" == "$version" ]]; then
+		return
+	fi
+	temporary="$TMUX_CLIENT_DIR/.agent.$$"
+	cp "$source" "$temporary"
+	chmod 700 "$temporary"
+	mv -f "$temporary" "$TMUX_CLIENT"
+	rm -f "$LEGACY_TMUX_CLIENT"
+}
+
+tmux_cmd() {
+	tmux -S "$SOCKET" -f "$CONFIG" "$@"
+}
+
+server_has_sessions() {
+	[[ -S "$SOCKET" ]] && tmux -S "$SOCKET" has-session 2>/dev/null
+}
+
+remove_stale_socket() {
+	if [[ -e "$SOCKET" || -S "$SOCKET" ]]; then
+		if ! tmux -S "$SOCKET" list-sessions >/dev/null 2>&1; then
+			rm -f "$SOCKET"
+		fi
+	fi
+}
+
+require_tmux_version() {
+	if ! command -v tmux >/dev/null 2>&1; then
+		printf 'tmux is required (3.5 or newer).\n' >&2
+		exit 69
+	fi
+	local version major remainder minor
+	version="$(tmux -V | awk '{print $2}')"
+	major="${version%%.*}"
+	remainder="${version#*.}"
+	minor="$(printf '%s' "$remainder" | sed 's/[^0-9].*$//')"
+	if [[ -z "$major" || -z "$minor" ]] || (( major < 3 || (major == 3 && minor < 5) )); then
+		printf 'tmux 3.5+ is required; found %s.\n' "$version" >&2
+		exit 69
+	fi
+}
+
+recorded_real_pi() {
+	if [[ -r "$STATE_DIR/real-pi" ]]; then
+		printf '%s\n' "$(<"$STATE_DIR/real-pi")"
+		return 0
+	fi
+	return 1
+}
+
+find_real_pi() {
+	local candidate wrapper_path shim_path
+	wrapper_path="$(resolve_path "$WRAPPER")"
+	shim_path="$(resolve_path "$SHIM")"
+
+	if recorded_real_pi >/dev/null 2>&1; then
+		candidate="$(recorded_real_pi)"
+		if [[ -x "$candidate" && "$(resolve_path "$candidate")" != "$wrapper_path" ]]; then
+			printf '%s\n' "$candidate"
+			return 0
+		fi
+	fi
+
+	while IFS= read -r candidate; do
+		[[ -n "$candidate" && -x "$candidate" ]] || continue
+		if [[ "$(resolve_path "$candidate")" != "$wrapper_path" && "$(resolve_path "$candidate")" != "$shim_path" ]]; then
+			printf '%s\n' "$candidate"
+			return 0
+		fi
+	done < <(type -a -p pi 2>/dev/null | awk '!seen[$0]++')
+
+	if [[ -x /opt/homebrew/bin/pi && "$(resolve_path /opt/homebrew/bin/pi)" != "$wrapper_path" ]]; then
+		printf '%s\n' /opt/homebrew/bin/pi
+		return 0
+	fi
+
+	printf 'Could not find the real Pi executable behind the prototype shim.\n' >&2
+	return 1
+}
+
+install_shim() {
+	require_tmux_version
+	init_state
+	prepare_tmux_client
+	local real_pi wrapper_path existing_path
+	real_pi="$(find_real_pi)"
+	wrapper_path="$(resolve_path "$WRAPPER")"
+
+	mkdir -p "$SHIM_DIR"
+	if [[ "$LEGACY_SHIM" != "$SHIM" && ( -e "$LEGACY_SHIM" || -L "$LEGACY_SHIM" ) ]]; then
+		if [[ "$(resolve_path "$LEGACY_SHIM")" == "$wrapper_path" ]]; then
+			rm -f "$LEGACY_SHIM"
+			printf 'Removed lower-precedence prototype shim: %s\n' "$LEGACY_SHIM"
+		fi
+	fi
+	if [[ -e "$SHIM" || -L "$SHIM" ]]; then
+		existing_path="$(resolve_path "$SHIM")"
+		if [[ "$existing_path" != "$wrapper_path" ]]; then
+			printf 'Refusing to replace existing %s (resolves to %s).\n' "$SHIM" "$existing_path" >&2
+			exit 73
+		fi
+	else
+		ln -s "$WRAPPER" "$SHIM"
+	fi
+
+	printf '%s\n' "$real_pi" > "$STATE_DIR/real-pi"
+	printf '%s\n' "$ROOT" > "$STATE_DIR/prototype-root"
+	chmod 600 "$STATE_DIR/real-pi" "$STATE_DIR/prototype-root"
+
+	printf 'Installed throwaway shim: %s -> %s\n' "$SHIM" "$WRAPPER"
+	printf 'Recorded real Pi: %s (%s)\n' "$real_pi" "$("$real_pi" --version 2>/dev/null || printf unknown)"
+	printf 'Private state: %s\n' "$STATE_DIR"
+	printf 'Next: open a normal VS Code integrated terminal and run plain `pi`.\n'
+}
+
+session_exists() {
+	local target="$1"
+	server_has_sessions && tmux -S "$SOCKET" has-session -t "=$target" 2>/dev/null
+}
+
+build_agent_command() {
+	local session_name="$1"
+	shift
+	local command
+	printf -v command '%q ' "$RUN_AGENT" "$session_name" "$@"
+	printf '%s\n' "$command"
+}
+
+create_agent() {
+	local cwd="$1"
+	shift
+	init_state
+	require_tmux_version
+	remove_stale_socket
+	if [[ ! -r "$STATE_DIR/real-pi" ]]; then
+		printf 'Prototype is not installed. Run %s install first.\n' "$0" >&2
+		exit 70
+	fi
+
+	local number session_name command outer_term outer_term_program outer_term_program_version outer_colorterm
+	outer_term="${PI_AGENT_CONSOLE_PROTOTYPE_OUTER_TERM:-${TERM:-}}"
+	outer_term_program="${PI_AGENT_CONSOLE_PROTOTYPE_OUTER_TERM_PROGRAM:-${TERM_PROGRAM:-}}"
+	outer_term_program_version="${PI_AGENT_CONSOLE_PROTOTYPE_OUTER_TERM_PROGRAM_VERSION:-${TERM_PROGRAM_VERSION:-}}"
+	outer_colorterm="${PI_AGENT_CONSOLE_PROTOTYPE_OUTER_COLORTERM:-${COLORTERM:-}}"
+	number=1
+	while (( number <= 999 )); do
+		printf -v session_name 'agent-%03d' "$number"
+		if ! session_exists "$session_name"; then
+			command="$(build_agent_command "$session_name" "$@")"
+			if tmux_cmd new-session -d -s "$session_name" -c "$cwd" \
+				-e "PI_AGENT_CONSOLE_PROTOTYPE_OUTER_TERM=$outer_term" \
+				-e "PI_AGENT_CONSOLE_PROTOTYPE_OUTER_TERM_PROGRAM=$outer_term_program" \
+				-e "PI_AGENT_CONSOLE_PROTOTYPE_OUTER_TERM_PROGRAM_VERSION=$outer_term_program_version" \
+				-e "PI_AGENT_CONSOLE_PROTOTYPE_OUTER_COLORTERM=$outer_colorterm" \
+				"$command" 2>/dev/null; then
+				printf '%s\n' "$session_name"
+				return 0
+			fi
+		fi
+		number=$((number + 1))
+	done
+	printf 'No free prototype Agent session name remains.\n' >&2
+	exit 75
+}
+
+latest_live_session() {
+	server_has_sessions || return 1
+	local line
+	line="$(tmux -S "$SOCKET" list-sessions -F '#{session_activity}|#{session_name}|#{pane_dead}' 2>/dev/null \
+		| awk -F '[|]' '$3 == "0" {print}' \
+		| sort -rn \
+		| head -1)"
+	if [[ -z "$line" ]]; then
+		line="$(tmux -S "$SOCKET" list-sessions -F '#{session_activity}|#{session_name}|#{pane_dead}' 2>/dev/null \
+			| sort -rn \
+			| head -1)"
+	fi
+	[[ -n "$line" ]] || return 1
+	printf '%s\n' "$line" | awk -F '[|]' '{print $2}'
+}
+
+attach_session() {
+	local target="${1:-}"
+	if [[ -z "$target" ]]; then
+		target="$(latest_live_session)" || {
+			printf 'No prototype Agent exists. Run plain `pi` to create one.\n' >&2
+			exit 69
+		}
+	fi
+	if ! session_exists "$target"; then
+		printf 'Unknown prototype Agent: %s\n' "$target" >&2
+		exit 69
+	fi
+	# VS Code defaults terminal tab titles to ${process}, ignores argv[0], and
+	# resolves the executable image path. A private copy gives the package-owned
+	# client the short process label "agent"; live Agent identity remains in OSC.
+	prepare_tmux_client
+	# VS Code 1.108+ supports DEC 2026 synchronized output. Advertise it
+	# explicitly so tmux preserves Pi's atomic frame boundaries to xterm.js.
+	exec "$TMUX_CLIENT" -S "$SOCKET" -f "$CONFIG" -T "$TMUX_CLIENT_FEATURES" attach-session -t "=$target"
+}
+
+attach_or_create() {
+	local -a pi_args
+	pi_args=("$@")
+	local target
+	if ! server_has_sessions; then
+		if (( ${#pi_args[@]} > 0 )); then
+			target="$(create_agent "$PWD" "${pi_args[@]}")"
+		else
+			target="$(create_agent "$PWD")"
+		fi
+	elif (( ${#pi_args[@]} > 0 )); then
+		target="$(create_agent "$PWD" "${pi_args[@]}")"
+	else
+		target="$(latest_live_session)"
+	fi
+	attach_session "$target"
+}
+
+print_status() {
+	init_state
+	printf 'Prototype root: %s\n' "$ROOT"
+	printf 'State directory: %s (mode %s)\n' "$STATE_DIR" "$(stat -f '%Lp' "$STATE_DIR" 2>/dev/null || stat -c '%a' "$STATE_DIR" 2>/dev/null || printf '?')"
+	printf 'Socket: %s\n' "$SOCKET"
+	if [[ -x "$TMUX_CLIENT" ]]; then
+		printf 'Private tmux client label: %s (%s)\n' "$TMUX_CLIENT" "$("$TMUX_CLIENT" -V)"
+	fi
+	if [[ -L "$SHIM" ]]; then
+		printf 'Plain-pi shim: %s -> %s\n' "$SHIM" "$(resolve_path "$SHIM")"
+	else
+		printf 'Plain-pi shim: not installed\n'
+	fi
+	if [[ -r "$STATE_DIR/real-pi" ]]; then
+		printf 'Real Pi: %s\n' "$(<"$STATE_DIR/real-pi")"
+	fi
+	if server_has_sessions; then
+		printf '\n%-12s %-9s %-7s %-8s %-12s %s\n' NAME ATTACHED DEAD PID COMMAND CREATED
+		tmux -S "$SOCKET" list-sessions -F '#{session_name}|#{session_attached}|#{pane_dead}|#{pane_pid}|#{pane_current_command}|#{t:session_created}' \
+			| sort \
+			| awk -F '[|]' '{printf "%-12s %-9s %-7s %-8s %-12s %s\n", $1, $2, $3, $4, $5, $6}'
+	else
+		printf 'tmux server: no live sessions\n'
+	fi
+}
+
+doctor() {
+	require_tmux_version
+	printf 'tmux: %s\n' "$(tmux -V)"
+	printf 'Pi: %s (%s)\n' "$(find_real_pi)" "$("$(find_real_pi)" --version 2>/dev/null || printf unknown)"
+	printf 'TERM_PROGRAM=%s TERM=%s COLORTERM=%s TMUX=%s\n' \
+		"${TERM_PROGRAM:-}" "${TERM:-}" "${COLORTERM:-}" "${TMUX:-}"
+	printf 'tmux-256color: '
+	if infocmp tmux-256color >/dev/null 2>&1; then printf 'available\n'; else printf 'MISSING\n'; fi
+
+	local test_dir test_socket terminal_overrides
+	test_dir="$(mktemp -d "${TMPDIR:-/tmp}/agent-console-tmux-config.XXXXXX")"
+	test_socket="$test_dir/socket"
+	trap 'tmux -S "$test_socket" kill-server >/dev/null 2>&1 || true; rm -rf "$test_dir"' EXIT
+	tmux -S "$test_socket" -f "$CONFIG" new-session -d -s config-check 'sleep 30'
+	terminal_overrides="$(tmux -S "$test_socket" show-options -gv terminal-overrides)"
+	printf 'config extended-keys=%s format=%s default-terminal=%s status=%s mouse=%s clipboard=%s\n' \
+		"$(tmux -S "$test_socket" show-options -s -v extended-keys)" \
+		"$(tmux -S "$test_socket" show-options -s -v extended-keys-format)" \
+		"$(tmux -S "$test_socket" show-options -gv default-terminal)" \
+		"$(tmux -S "$test_socket" show-options -gv status)" \
+		"$(tmux -S "$test_socket" show-options -gv mouse)" \
+		"$(tmux -S "$test_socket" show-options -s -v set-clipboard)"
+	if ! grep -Fq 'xterm*:Eneks=\E[=1u:Dseks=\E[=0u' <<<"$terminal_overrides"; then
+		printf 'config is missing the VS Code Kitty/CSI-u outer-key bridge.\n' >&2
+		exit 78
+	fi
+	printf 'config VS Code key bridge: Eneks=CSI =1u Dseks=CSI =0u\n'
+	printf 'config private client features: %s\n' "$TMUX_CLIENT_FEATURES"
+	if [[ ! -x /usr/bin/pbcopy ]]; then
+		printf 'config requires /usr/bin/pbcopy for repeatable mouse selection on this macOS prototype.\n' >&2
+		exit 78
+	fi
+	tmux -S "$test_socket" kill-server >/dev/null 2>&1 || true
+	rm -rf "$test_dir"
+	trap - EXIT
+}
+
+nested_test() {
+	if [[ ! -x "$SHIM" ]]; then
+		printf 'Install the prototype first.\n' >&2
+		exit 70
+	fi
+	init_state
+	local test_dir test_socket output command
+	test_dir="$(mktemp -d "${TMPDIR:-/tmp}/agent-console-nested.XXXXXX")"
+	test_socket="$test_dir/socket"
+	output="$test_dir/output"
+	printf -v command '%q __prototype_nested_probe > %q 2>&1' "$SHIM" "$output"
+	tmux -S "$test_socket" -f /dev/null new-session -d -s foreign "$command" || true
+	local tries=0
+	while [[ ! -s "$output" && $tries -lt 50 ]]; do
+		sleep 0.05
+		tries=$((tries + 1))
+	done
+	cat "$output" 2>/dev/null || true
+	tmux -S "$test_socket" kill-server >/dev/null 2>&1 || true
+	if ! grep -q 'unsupported pre-existing tmux detected' "$output" 2>/dev/null; then
+		rm -rf "$test_dir"
+		printf 'Nested-tmux probe did not produce the expected fail-closed result.\n' >&2
+		exit 1
+	fi
+	rm -rf "$test_dir"
+}
+
+uninstall_shim() {
+	local wrapper_path removed candidate
+	wrapper_path="$(resolve_path "$WRAPPER")"
+	removed=false
+	for candidate in "$SHIM" "$LEGACY_SHIM"; do
+		if [[ -e "$candidate" || -L "$candidate" ]]; then
+			if [[ "$(resolve_path "$candidate")" == "$wrapper_path" ]]; then
+				rm -f "$candidate"
+				printf 'Removed throwaway plain-pi shim: %s\n' "$candidate"
+				removed=true
+			elif [[ "$candidate" == "$SHIM" ]]; then
+				printf 'Refusing to remove unrelated %s.\n' "$candidate" >&2
+				exit 73
+			fi
+		fi
+	done
+	if [[ "$removed" == "false" ]]; then
+		printf 'Throwaway plain-pi shim is already absent.\n'
+	fi
+	if server_has_sessions; then
+		printf 'Live prototype Agents were left running. Use `%s stop --force` to stop them.\n' "$0"
+	fi
+}
+
+stop_server() {
+	if [[ "${1:-}" != "--force" ]]; then
+		print_status
+		printf '\nStopping the private server terminates every prototype Agent. Re-run with `stop --force`.\n' >&2
+		exit 64
+	fi
+	if server_has_sessions; then
+		tmux -S "$SOCKET" kill-server
+		printf 'Stopped all throwaway prototype Agents.\n'
+	else
+		printf 'No prototype Agents are running.\n'
+	fi
+	rm -f "$SOCKET"
+}
+
+clean_all() {
+	if [[ "${1:-}" != "--force" ]]; then
+		printf 'Clean removes the shim, terminates prototype Agents, and deletes prototype runtime logs.\n' >&2
+		printf 'Re-run with `clean --force`.\n' >&2
+		exit 64
+	fi
+	stop_server --force
+	uninstall_shim
+	rm -rf "$STATE_DIR"
+	printf 'Removed prototype runtime state: %s\n' "$STATE_DIR"
+}
+
+command="${1:-}"
+case "$command" in
+	install)
+		install_shim
+		;;
+	doctor)
+		doctor
+		;;
+	status)
+		print_status
+		;;
+	new)
+		shift
+		cwd="$PWD"
+		if [[ "${1:-}" == "--cwd" ]]; then
+			[[ $# -ge 2 ]] || { printf '%s\n' '--cwd requires a path' >&2; exit 64; }
+			cwd="$2"
+			shift 2
+		fi
+		if [[ "${1:-}" == "--" ]]; then shift; fi
+		create_agent "$cwd" "$@"
+		;;
+	attach)
+		shift
+		attach_session "${1:-}"
+		;;
+	attach-or-create)
+		shift
+		if [[ "${1:-}" == "--" ]]; then shift; fi
+		attach_or_create "$@"
+		;;
+	nested-test)
+		nested_test
+		;;
+	uninstall)
+		uninstall_shim
+		;;
+	stop)
+		shift
+		stop_server "${1:-}"
+		;;
+	clean)
+		shift
+		clean_all "${1:-}"
+		;;
+	-h|--help|help|'')
+		usage
+		;;
+	*)
+		printf 'Unknown command: %s\n\n' "$command" >&2
+		usage >&2
+		exit 64
+		;;
+esac

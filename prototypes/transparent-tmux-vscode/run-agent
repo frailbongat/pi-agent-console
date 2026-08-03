@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# THROWAWAY PROTOTYPE — launch one real native Pi Agent inside its tmux session.
+set -euo pipefail
+
+ROOT="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+STATE_DIR="${PI_AGENT_CONSOLE_PROTOTYPE_STATE_DIR:-$HOME/.cache/pi-agent-console-wayfinder-tmux}"
+SOCKET="$STATE_DIR/tmux.sock"
+
+if [[ $# -lt 1 ]]; then
+	printf 'usage: %s <tmux-session> [pi arguments...]\n' "$0" >&2
+	exit 64
+fi
+
+SESSION_NAME="$1"
+shift
+if [[ ! "$SESSION_NAME" =~ ^agent-[0-9][0-9][0-9]$ ]]; then
+	printf 'invalid prototype Agent session name: %s\n' "$SESSION_NAME" >&2
+	exit 64
+fi
+
+REAL_PI="$(<"$STATE_DIR/real-pi")"
+mkdir -p "$STATE_DIR/logs" "$STATE_DIR/agents"
+chmod 700 "$STATE_DIR" "$STATE_DIR/logs" "$STATE_DIR/agents"
+
+# New Agents must not inherit another Pi session's volatile identity merely
+# because Agent Console launched them from an extension command.
+unset PI_CODING_AGENT PI_SESSION_ID PI_SESSION_FILE PI_PROVIDER PI_MODEL PI_REASONING_LEVEL
+
+export PATH="$ROOT/bin:$PATH"
+export PI_AGENT_CONSOLE_PROTOTYPE=1
+export PI_AGENT_CONSOLE_PROTOTYPE_ROOT="$ROOT"
+export PI_AGENT_CONSOLE_PROTOTYPE_STATE_DIR="$STATE_DIR"
+export PI_AGENT_CONSOLE_PROTOTYPE_SOCKET="$SOCKET"
+export PI_AGENT_CONSOLE_PROTOTYPE_SESSION="$SESSION_NAME"
+export PI_AGENT_CONSOLE_PROTOTYPE_LAUNCHED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+export PI_TUI_WRITE_LOG="${PI_TUI_WRITE_LOG:-$STATE_DIR/logs/$SESSION_NAME.ansi.log}"
+
+AGENT_NUMBER="${SESSION_NAME#agent-}"
+exec "$REAL_PI" \
+	--extension "$ROOT/extension.ts" \
+	--name "Agent Console prototype $AGENT_NUMBER" \
+	"$@"
