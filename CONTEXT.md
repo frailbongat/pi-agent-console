@@ -21,8 +21,32 @@ A durable Pi session identity and history linked to an Agent. It may be reserved
 _Avoid_: Agent, runtime
 
 **Agent**:
-A durable supervised identity linked to exactly one Conversation, whether dispatched by Agent Console or deliberately adopted. It has at most one live Agent Runtime and persists across runtime replacement until permanently deleted.
+A durable supervised identity linked immutably to exactly one Conversation, whether dispatched by Agent Console or deliberately adopted. It has at most one live Agent Runtime and persists across runtime replacement until permanently deleted.
 _Avoid_: Subagent, worker, process
+
+**Terminal Client**:
+One interactive terminal connection that moves between Agent Console and an Agent's native Pi interface. It may hold at most one Input Lease at a time.
+_Avoid_: Agent, Agent Runtime, terminal emulator
+
+**Attach**:
+The successful transition by which a Terminal Client presents an Agent's native Pi interface while holding that Agent's Input Lease. Attachment does not change Agent Status or interrupt its work.
+_Avoid_: Resume, Registration, mirrored frontend
+
+**Detach**:
+The same-terminal transition from an Agent's native Pi interface to Agent Console. The Agent and its work continue, editor state is preserved, and the Terminal Client retains the Input Lease because that Agent hosts the Console.
+_Avoid_: Terminal disconnect, Stop, Input Lease release
+
+**Handoff**:
+The fenced, all-or-nothing movement of a Terminal Client from one Agent to another through Agent Console. The target Attach and source release either both succeed or the source attachment remains unchanged. Ordinary input is disabled while the Handoff is pending and is never buffered or replayed into its result.
+_Avoid_: Agent restart, Conversation switch, best-effort terminal switch
+
+**Input Lease**:
+The Supervisor-authoritative exclusive permission for one Terminal Client to deliver interactive input to one Agent. An Agent has at most one generation-fenced Input Lease, and every input-bearing command must present its current generation. It is released only by a completed Handoff away, authoritative disconnect, or confirmed Takeover; heartbeat loss makes ownership uncertain rather than expiring it.
+_Avoid_: Workspace Claim, process lock, read-only viewer
+
+**Takeover**:
+An explicit transfer of an Agent's Input Lease to another Terminal Client. The prior holder is revoked and fenced before the new holder can deliver input; Takeover never stops the Agent or its work.
+_Avoid_: Newest-client-wins, mirrored frontend, Agent restart
 
 **Agent Name**:
 The Supervisor-authoritative, mutable, non-unique display name of an Agent, mirrored to its Pi Conversation name when possible. It identifies an Agent for humans but is never its durable identity.
@@ -57,7 +81,7 @@ The exact commit frozen when New or Dispatch is accepted and used to create its 
 _Avoid_: Default branch, launch-time `HEAD`, remote guess, Dispatch Target
 
 **Workspace Claim**:
-The Supervisor-authoritative durable and exclusive assignment of one canonical Agent Workspace to one Agent. It survives Agent Runtime replacement and prevents assignment to another Agent until released; a Git worktree lock protects metadata but is not the Workspace Claim.
+The Supervisor-authoritative durable and exclusive assignment of one canonical Agent Workspace to one Agent. It survives Agent Runtime replacement and prevents assignment to another Agent until released; a compatible bare Pi invocation in the claimed workspace returns to its owning Agent rather than creating another. A Git worktree lock protects metadata but is not the Workspace Claim.
 _Avoid_: Git worktree lock, process lock, Runtime lease
 
 **Workspace Conflict**:
@@ -89,8 +113,20 @@ The sanitized, volatile process environment captured from the client that accept
 _Avoid_: Supervisor environment, persisted environment snapshot
 
 **Agent Runtime**:
-One live execution epoch of an Agent. Stopping and resuming replaces the Agent Runtime while preserving the Agent and its Conversation.
+One live execution epoch of an Agent, bound to that Agent's immutable Conversation for the entire epoch. Stopping and resuming replaces the Agent Runtime while preserving the Agent and its Conversation; changing Conversation selects or creates another Agent rather than replacing the session in process.
 _Avoid_: Agent, conversation
+
+**Registration**:
+The idempotent handshake that admits a compatible persistent interactive Pi invocation to supervision before writable input. A new Conversation creates its Agent and Original Checkout ownership; an already-bound Conversation reconnects to its existing Agent. Incompatible and explicitly non-persistent invocations remain unsupervised.
+_Avoid_: Adoption, package installation, process discovery
+
+**Adoption**:
+The deliberate operation that creates an Agent for an unowned saved Pi Conversation, starts its Agent Runtime, and attaches the requesting Terminal Client. Conversation write ownership must be proven exclusive; Adoption is never record-only.
+_Avoid_: Registration, Resume, session import
+
+**Resume**:
+The explicit start of a fresh Agent Runtime for an existing Agent and its immutable Conversation after no live Runtime remains.
+_Avoid_: Adoption, Attach, in-process Conversation replacement
 
 **Runtime Condition**:
 The condition of an Agent's current Agent Runtime—none, starting, live, unreachable, or stopping—tracked independently from Agent Status.
