@@ -1,0 +1,10 @@
+#!/bin/sh
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+PI_BIN=${PI_BIN:-pi}
+
+exec "$PI_BIN" \
+	--no-extensions \
+	--no-session \
+	-e "$ROOT/prototypes/agent-console-interaction-model/extension.ts"
